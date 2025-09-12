@@ -1,10 +1,6 @@
 // /api/upload.js  (Vercel Serverless Function)
-// Recibe: { adminKey, fileBase64, path, message }
-// Sube/actualiza un archivo en un repo de GitHub (API Contents).
-
 export default async function handler(req, res) {
-  // --- CORS (permite llamadas desde tu GitHub Pages) ---
-  const ORIGIN = process.env.ALLOW_ORIGIN || "*"; // mejor: https://ingetes.github.io
+  const ORIGIN = process.env.ALLOW_ORIGIN || "*";
   res.setHeader("Access-Control-Allow-Origin", ORIGIN);
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -23,10 +19,10 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok:false, msg:"Faltan datos (fileBase64, path)" });
     }
 
-    const owner  = process.env.GH_OWNER;     // ej: "Ingetes"
-    const repo   = process.env.GH_REPO;      // ej: "Prueba-portal-cotizaciones"
+    const owner  = process.env.GH_OWNER;
+    const repo   = process.env.GH_REPO;
     const branch = process.env.GH_BRANCH || "main";
-    const token  = process.env.GH_TOKEN;     // PAT con contents:write
+    const token  = process.env.GH_TOKEN;
 
     if (!owner || !repo || !token) {
       return res.status(500).json({ ok:false, msg:"Faltan variables GH_*" });
@@ -34,7 +30,7 @@ export default async function handler(req, res) {
 
     const apiBase = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`;
 
-    // 1) Obtener SHA si existe
+    // Obtener SHA si el archivo ya existe
     let sha;
     const head = await fetch(`${apiBase}?ref=${branch}`, {
       headers: {
@@ -43,12 +39,9 @@ export default async function handler(req, res) {
         "User-Agent": "ingetes-portal"
       }
     });
-    if (head.ok) {
-      const j = await head.json();
-      sha = j.sha;
-    }
+    if (head.ok) { const j = await head.json(); sha = j.sha; }
 
-    // 2) PUT = crear/actualizar archivo
+    // PUT: crear/actualizar
     const put = await fetch(apiBase, {
       method: "PUT",
       headers: {
@@ -59,8 +52,8 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         message: message || `update ${path}`,
-        content: fileBase64, // base64 sin "data:application/pdf;base64,"
-        sha,                 // incluir solo si existe
+        content: fileBase64, // base64 sin encabezado
+        sha,                 // solo si existe
         branch
       })
     });
