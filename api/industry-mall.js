@@ -12,7 +12,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok:false, msg:'Falta parámetro mlfb', description:'' });
     }
 
-    const langs = ['en', 'es', 'de'];
+    const langs = ['en', 'es'];
     let best = { description: '', source: '' };
 
     for (const lang of langs) {
@@ -40,6 +40,10 @@ export default async function handler(req, res) {
           !/^image\s*\d*:/i.test(s) &&
           !/^slide\s*\d+\s*of\s*\d+$/i.test(s) &&
           !/^stories? carousel/i.test(s) &&
+          !/^={3,}$/i.test(s) &&
+          !/^(descargar|descargue)/i.test(s) &&
+          !/^(download|herunterladen)/i.test(s) &&
+          !/^(ver todo|ver todas|see all|alle .* anzeigen)/i.test(s)
           !/^(updates?|see all|catalog(\/| )brochure|application example|faq|certificates?|gsd:|download|product note)/i.test(s)
         );
 
@@ -71,6 +75,7 @@ export default async function handler(req, res) {
   } catch (e) {
     return res.status(500).json({ ok:false, msg: e?.message || 'Error interno', description:'' });
   }
+  
 }
 
 /* ===== helpers ===== */
@@ -80,20 +85,24 @@ function sanitizeRaw(txt){
   return txt
     .replace(/\u00A0/g,' ')
     .replace(/\r/g,'')
-    // imágenes: ![alt](url)
+     // imágenes: ![alt](url)
     .replace(/!\[[^\]]*\]\([^)]+\)/g, ' ')
     // enlaces: [text](url) -> text
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
     // headings/bullets
     .replace(/^[#>*\-\s]+/gm, '')
     // “based on trending… stories carousel…”
-    .replace(/Based on trending topics[\s\S]*?(Stories Carousel|Slide \d+ of \d+)/i, ' ')
+     .replace(/\b(Descargar|Descargue|Download|Herunterladen)\b[^.\n]*\b(product(o)?s?|product|Produkte)?\b[^.\n]*\b(imagen(es)?|images?|Daten|data)\b[^.\n]*[.\n]/gi, ' ')
     // “See all … / Updates for … / Download product …”
-    .replace(/\b(Updates? for|See all (product notes|characteristics|FAQs|catalogs|brochures|certificates|downloads|application examples|product (data|images)))\b[\s\S]*?($|\n)/gi,' ')
+    .replace(/\b(See all|Ver (todo|todas?)|Alle .* anzeigen)\b[^.\n]*[.\n]/gi, ' ')
     // bloque “Title/Source/Published Time”
-    .replace(/^Title:.*$|^Source:.*$|^Published Time:.*$/gmi, '')
-    // compactar espacios
+     .replace(/^Title:.*$|^Source:.*$|^Published Time:.*$/gmi, '')
+    // carruseles “Stories/Slides”
     .replace(/[ \t]+/g,' ');
+  .replace(/Stories? Carousel.*$/gmi, ' ')
+  .replace(/^Slide \d+ of \d+.*$/gmi, ' ')
+  // compacta espacios
+  .replace(/[ \t]+/g,' ');
 }
 
 function indexOfFirst(arr, testers) {
@@ -105,6 +114,15 @@ function indexOfFirst(arr, testers) {
 
 function pickParagraph(lines, fromIdx) {
   const stopper = /(Specifications|Especificaciones|Documents?\s*&\s*downloads|Support|Soporte|Related products?)/i;
+  // recorte exacto hasta "keeper kit" si aparece
+  const kk = description.toLowerCase().indexOf('keeper kit');
+  if (kk >= 0) description = description.slice(0, kk + 'keeper kit'.length);
+
+  // si aún queda muy largo, quédate con la primera oración técnica larga
+  if (description.length > 250) {
+    const m = description.match(/^(.{80,300}?)(?:\.|;|:)(\s|$)/);
+    if (m) description = m[1];
+  }    
   const isTitle = (s) =>
     /^[A-Z0-9._-]{6,}$/.test(s) ||
     /^(overview|vista general)$/i.test(s);
