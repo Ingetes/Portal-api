@@ -21,11 +21,8 @@ export default async function handler(req, res) {
       const proxy  = `https://r.jina.ai/http://mall.industry.siemens.com/mall/${lang}/ww/Catalog/Product/?mlfb=${encodeURIComponent(mlfb)}`;
 
       try {
-        const r = await fetch(proxy, { headers: { 'Accept': 'text/plain' }, cache: 'no-store' });
-        if (!r.ok) continue;
-
-        let txt = await r.text();
-        if (!txt) continue;
+let txt = await fetchTextWithRetry(proxy, 2);
+if (!txt) continue;
 
         // Limpieza fuerte (ES/EN/DE)
         txt = sanitizeRaw(txt);
@@ -50,8 +47,7 @@ export default async function handler(req, res) {
 
         // Ancla: MLFB o “Overview/Vista general”
         const idxOverview = indexOfFirst(lines, [
-          s => s.toUpperCase() === String(mlfb).toUpperCase(),
-          s => /^(overview|vista general)$/i.test(s)
+        s => /^(overview|vista general|resumen general)$/i.test(s)
         ]);
 
         // Párrafo técnico
@@ -89,10 +85,6 @@ function sanitizeRaw(txt){
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
     // headings/bullets
     .replace(/^[#>*\-\s]+/gm, '')
-    // “Descargar/Download/Herunterladen … imágenes/datos…”
-    .replace(/\b(Descargar|Descargue|Download|Herunterladen)\b[^.\n]*\b(product(o)?s?|product|Produkte)?\b[^.\n]*\b(imagen(es)?|images?|Daten|data)\b[^.\n]*[.\n]/gi, ' ')
-    // “See all / Ver todo / Alle … anzeigen”
-    .replace(/\b(See all|Ver (todo|todas?)|Alle .* anzeigen)\b[^.\n]*[.\n]/gi, ' ')
     // bloque Title/Source/Published
     .replace(/^Title:.*$|^Source:.*$|^Published Time:.*$/gmi, '')
     // carruseles “Stories/Slides”
@@ -110,10 +102,9 @@ function indexOfFirst(arr, testers) {
 }
 
 function pickParagraph(lines, fromIdx) {
-  const stopper = /(Specifications|Especificaciones|Documents?\s*&\s*downloads|Support|Soporte|Related products?)/i;
-  const isTitle = (s) =>
-    /^[A-Z0-9._-]{6,}$/.test(s) ||
-    /^(overview|vista general)$/i.test(s);
+const isTitle = (s) =>
+  /^[A-Z0-9._-]{6,}$/.test(s) ||
+  /^(overview|vista general|resumen general)$/i.test(s);
 
   let cur = [];
   for (let i = fromIdx; i < lines.length; i++) {
@@ -182,3 +173,20 @@ function score(s){
 }
 
 function escapeRegExp(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+async function fetchTextWithRetry(url, tries = 2) {
+  for (let i = 0; i < tries; i++) {
+    const r = await fetch(url, { headers: { Accept: 'text/plain' }, cache: 'no-store' });
+    if (r.ok) {
+      const txt = (await r.text()) || '';
+      // si r.jina.ai dice que aún no cargó, reintenta
+      if (!/maybe not yet fully loaded/i.test(txt)) {
+        return txt.replace(/\u00A0/g, ' ').replace(/\r/g, '');
+      }
+    }
+    // espera 1.2s y reintenta
+    await new Promise(res => setTimeout(res, 1200));
+  }
+  return '';
+}
+
