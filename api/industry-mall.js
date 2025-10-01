@@ -150,10 +150,10 @@ function finalize(text, mlfb){
   const kk = desc.toLowerCase().indexOf('keeper kit');
   if (kk >= 0) desc = desc.slice(0, kk + 'keeper kit'.length);
 
-  // Si aún es largo, quédate con la primera oración técnica “grande”
-  if (desc.length > 250) {
-    const m = desc.match(/^(.{80,300}?)(?:\.|;|:)(\s|$)/);
-    if (m) desc = m[1];
+  // Si aún es muy largo, quedarnos con las primeras 2–3 frases completas
+  const sentences = desc.split(/(?<=[.;])\s+/);
+  if (sentences.length > 2) {
+    desc = sentences.slice(0,3).join(' ');
   }
 
   // Limpieza final
