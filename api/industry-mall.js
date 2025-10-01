@@ -17,38 +17,39 @@ export default async function handler(req, res) {
 
     for (const lang of langs) {
       const mallUrl = `https://mall.industry.siemens.com/mall/${lang}/ww/Catalog/Product/?mlfb=${encodeURIComponent(mlfb)}`;
-      const mallText = await fetchTextViaJina(mallUrl);
+      const mallTxt = await fetchText(mallUrl);
+      if (!mallTxt) continue;
 
-      if (!mallText) continue;
-
-      // ¿El Mall nos está diciendo que la info real está en SiePortal?
-      const sieUrl = sniffSiePortalUrl(mallText);
-      if (sieUrl) {
-        const sieText = await fetchTextViaJina(sieUrl);
-        const desc = extractOverviewParagraph(sieText, mlfb, true);
-        if (score(desc) > score(best.description)) best = { description: desc, source: mallUrl };
-        if (score(best.description) >= 70) break;
-      } else {
-        const desc = extractOverviewParagraph(mallText, mlfb, false);
+      // ¿hay salto a SiePortal?
+      const sie = sniffSiePortalUrl(mallTxt);
+      if (sie) {
+        const sieTxt = await fetchText(sie);
+        const desc = extractFromOverview(sieTxt, mlfb);
         if (score(desc) > score(best.description)) best = { description: desc, source: mallUrl };
         if (score(best.description) >= 70) break;
       }
+
+      // Si no hay SiePortal o queremos intentar con el propio Mall
+      const descMall = extractFromOverview(mallTxt, mlfb);
+      if (score(descMall) > score(best.description)) best = { description: descMall, source: mallUrl };
+      if (score(best.description) >= 70) break;
     }
 
     if (!best.description) best.description = `${mlfb} — ver ficha en Industry Mall.`;
     res.status(200).json({ ok:true, source: best.source, description: best.description });
   } catch (e) {
-    res.status(500).json({ ok:false, msg:e?.message || 'Error interno', description:'' });
+    res.status(200).json({ ok:false, msg:e?.message || 'Error interno', description:'' });
   }
 }
 
-/* ================= helpers ================= */
+/* ========== helpers ========== */
 
-async function fetchTextViaJina(url){
+async function fetchText(url){
   try{
+    // r.jina.ai devuelve el “texto visible” de la página como markdown plano
     const proxy = `https://r.jina.ai/http://${url.replace(/^https?:\/\//,'')}`;
     const r = await fetch(proxy, { headers:{ Accept:'text/plain' }, cache:'no-store' });
-    if(!r.ok) return '';
+    if (!r.ok) return '';
     return (await r.text() || '').replace(/\u00A0/g,' ').replace(/\r/g,'');
   }catch{ return ''; }
 }
@@ -58,104 +59,92 @@ function sniffSiePortalUrl(txt){
   return m ? m[0] : '';
 }
 
-function extractOverviewParagraph(raw, mlfb, isSiePortal){
+function extractFromOverview(raw, mlfb){
   if (!raw) return '';
 
-  // 1) limpiar markdown y ruido
-  let txt = raw
-    // quita imágenes ![alt](url)
-    .replace(/!\[[^\]]*\]\([^)]+\)/g,' ')
-    // convierte links [text](url) -> text
-    .replace(/\[([^\]]+)\]\([^)]+\)/g,'$1')
-    // colapsa espacios
-    .replace(/[ \t]+/g,' ');
+  // 0) limpieza fuerte de markdown y ruido
+  let t = raw
+    // quita imágenes: ![alt](url)
+    .replace(/!\[[^\]]*]\([^)]+\)/g, ' ')
+    // reemplaza enlaces [txt](url) -> txt
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    // quita headings markdown ###, **, etc.
+    .replace(/^[#>*\-\s]+/gm, '')
+    // compacta espacios
+    .replace(/[ \t]+/g, ' ');
 
-  const lines = txt.split('\n')
+  // 1) ancla: posición de MLFB o de "Overview/Vista general"
+  const up = mlfb.toUpperCase();
+  let i = t.toUpperCase().indexOf(up);
+  if (i < 0) {
+    const idxOv = t.search(/\b(Overview|Vista general)\b/i);
+    i = idxOv >= 0 ? idxOv : 0;
+  }
+
+  // 2) recorta una ventana alrededor del ancla (evita encabezados globales)
+  const start = Math.max(0, i - 400);
+  let win = t.slice(start, start + 5000);
+
+  // 3) corta donde cambian de pestaña/sección
+  win = win.split(/\b(Specifications|Especificaciones|Documents?\s*&\s*downloads|Support|Soporte)\b/i)[0];
+
+  // 4) quitamos bloques conocidos de marketing/header/carrusel
+  win = win
+    .replace(/Based on trending topics[\s\S]*?(Stories Carousel|Slide \d+ of \d+|Product\s+###)/i, ' ')
+    .replace(/\b(Buy now|Add to cart|Show (More|Less)|Print|Download product (images|data) .*?)\b/gi, ' ')
+    .replace(/\b(Services|Trainings|News|Events|Application examples)\b:?.*$/i, ' ');
+
+  // 5) líneas limpias
+  const lines = win.split('\n')
     .map(s => s.trim())
     .filter(Boolean)
-    // fuera navegación / legal / buscador
+    // fuera restos de navegación/marketing
     .filter(s => !/^(siemens|industry|mall|home)$/i.test(s))
     .filter(s => !/(cookies|consent|privacy|login|cart|search|terms)/i.test(s))
-    // fuera “Title: … URL Source: … Published Time …”
-    .filter(s => !/^Title:\s*/i.test(s) && !/^Source:\s*/i.test(s) && !/^Published Time:/i.test(s))
-    // fuera "Image x: ..."
-    .filter(s => !/^image\s*\d*:/i.test(s));
+    .filter(s => !/^image\s*\d*:/i.test(s))
+    .filter(s => !/^Slide \d+ of \d+$/i.test(s))
+    .filter(s => s.length > 2);
 
-  // 2) buscar ancla: MLFB o "Overview/Vista general"
-  const idx = indexOfFirst(lines, [
-    s => s.toUpperCase() === String(mlfb).toUpperCase(),
-    s => /^(overview|vista general)$/i.test(s)
-  ]);
+  // 6) arma el primer párrafo técnico bueno
+  let desc = pickParagraph(lines);
 
-  // 3) formar párrafo técnico
-  let para = pickParagraph(lines, Math.max(0, idx));
-
-  // si salió flojo, intenta en todo el doc
-  if (!isGood(para)) para = pickParagraph(lines, 0);
-
-  // 4) cortes duros cuando cambian de pestaña/sección
-  const hardStops = [
-    /\b(Specifications|Especificaciones)\b/i,
-    /\b(Documents?\s*&\s*downloads|Documentos?\s*&\s*descargas)\b/i,
-    /\b(Support|Soporte)\b/i,
-    /\b(Product lifecycle)\b/i,
-    /\b(Download product data sheet|Print)\b/i,
-  ];
-  let desc = (para || '').replace(/\s+/g,' ').trim();
-  for (const re of hardStops) {
-    const m = desc.match(re);
-    if (m) desc = desc.slice(0, m.index).trim();
-  }
-
-  // 5) petición del usuario: cortar exactamente en "keeper kit"
+  // 7) recorte especial pedido: hasta "keeper kit"
   const kk = desc.toLowerCase().indexOf('keeper kit');
-  if (kk >= 0) desc = desc.slice(0, kk + 'keeper kit'.length).trim();
+  if (kk >= 0) desc = desc.slice(0, kk + 'keeper kit'.length);
 
-  // 6) límites
+  // 8) limpieza final
+  desc = desc.replace(/\s+/g,' ').trim();
   if (desc.length > 900) desc = desc.slice(0,900) + '…';
-  return desc;
+
+  return isGood(desc) ? desc : '';
 }
 
-function indexOfFirst(arr, testers){
-  for (let i=0;i<arr.length;i++){
-    for (const t of testers) if (t(arr[i])) return i;
-  }
-  return -1;
-}
+function pickParagraph(lines){
+  const stop = /(Specifications|Especificaciones|Documents?\s*&\s*downloads|Support|Soporte)/i;
+  const looksTitle = s => /^[A-Z0-9._-]{6,}$/.test(s) || /^(Overview|Vista general)$/i.test(s);
 
-function pickParagraph(lines, fromIdx){
-  const stopper = /(Specifications|Especificaciones|Documents?\s*&\s*downloads|Support|Soporte)/i;
-  const looksTitle = s =>
-    /^[A-Z0-9._-]{6,}$/.test(s) || /^(overview|vista general)$/i.test(s);
-
-  let cur=[]; const blocks=[];
-  for (let i=fromIdx;i<lines.length;i++){
+  let cur = [];
+  for (let i=0;i<lines.length;i++){
     const s = lines[i];
-    if (!s || looksTitle(s) || stopper.test(s)) {
-      if (cur.length){ blocks.push(cur.join(' ')); cur=[]; }
+    if (!s || looksTitle(s) || stop.test(s)) {
+      if (isGood(cur.join(' '))) break;
+      cur = [];
       continue;
     }
     cur.push(s);
-    const joined = cur.join(' ');
-    if (isGood(joined) && /[.;:]$/.test(s)) { blocks.push(joined); cur=[]; }
-    if (joined.length > 700) { blocks.push(joined); cur=[]; }
-  }
-  if (cur.length) blocks.push(cur.join(' '));
 
-  const candidates = blocks.filter(isGood).sort((a,b)=>score(b)-score(a));
-  return candidates[0] || '';
+    // si ya tenemos buen bloque y la oración cerró, devuélvelo
+    const joined = cur.join(' ');
+    if (isGood(joined) && /[.;:]$/.test(s)) return joined;
+    if (joined.length > 700) return joined; // evita “comerse” todo
+  }
+  const joined = cur.join(' ');
+  return isGood(joined) ? joined : '';
 }
 
 function isGood(s){
-  if (!s) return false;
-  if (s.length < 60) return false;
-  const tech = /\b(AC|DC|V|A|kA|kW|mm|IP\d{2}|UL|IEC|breaker|contactor|module|módulo|input|output|I\/O|short-?circuit|overload|frame|3[- ]?pole|3P|ET\s?200|LOGO!|PLC|bus\s*bar|protection|diagnostics)\b/i;
+  if (!s || s.length < 60) return false;
+  const tech = /\b(AC|DC|V|A|kA|kW|mm|IP\d{2}|UL|IEC|breaker|contactor|module|módulo|input|output|I\/O|short-?circuit|overload|frame|3[- ]?pole|3P|ET\s?200|LOGO!|PLC|bus\s*bar|protection|diagnostics|In=|Icu=|Ir=|Ii=|24V|24 V)\b/i;
   return tech.test(s) || s.length > 140;
 }
-
-function score(s){
-  if (!s) return 0;
-  const base = Math.min(s.length, 600)/10;
-  const bonus = /\b(AC|DC|V|A|kA|kW|mm|IP\d{2}|UL|IEC|breaker|contactor|module|módulo|I\/O|diagnostics)\b/i.test(s) ? 40 : 0;
-  return base + bonus;
-}
+function score(s){ if (!s) return 0; const base = Math.min(s.length,600)/10; const bonus = /\b(AC|DC|V|A|kA|kW|mm|IP\d{2}|UL|IEC|breaker|module|I\/O)\b/i.test(s)?40:0; return base+bonus; }
