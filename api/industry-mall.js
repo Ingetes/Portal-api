@@ -12,7 +12,8 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok:false, msg:'Falta parámetro mlfb', description:'' });
     }
 
-    const langs = ['en', 'es'];
+    // Prioriza ES, luego EN (evitamos DE)
+    const langs = ['es', 'en'];
     let best = { description: '', source: '' };
 
     for (const lang of langs) {
@@ -26,12 +27,12 @@ export default async function handler(req, res) {
         let txt = await r.text();
         if (!txt) continue;
 
-        // --- Limpieza fuerte de markdown y ruido global ---
+        // Limpieza fuerte (ES/EN/DE)
         txt = sanitizeRaw(txt);
 
         const linesAll = txt.split('\n').map(s => s.trim());
 
-        // Filtra ruido típico línea a línea
+        // Filtra ruido línea a línea
         const lines = linesAll.filter(s =>
           s &&
           s.length > 1 &&
@@ -43,23 +44,21 @@ export default async function handler(req, res) {
           !/^={3,}$/i.test(s) &&
           !/^(descargar|descargue)/i.test(s) &&
           !/^(download|herunterladen)/i.test(s) &&
-          !/^(ver todo|ver todas|see all|alle .* anzeigen)/i.test(s)
-          !/^(updates?|see all|catalog(\/| )brochure|application example|faq|certificates?|gsd:|download|product note)/i.test(s)
+          !/^(ver todo|ver todas|see all|alle .* anzeigen)/i.test(s) &&
+          !/^(updates?|catalog(\/| )brochure|application example|faq|certificates?|gsd:|product note)/i.test(s)
         );
 
-        // Encuentra ancla: MLFB o tab Overview
+        // Ancla: MLFB o “Overview/Vista general”
         const idxOverview = indexOfFirst(lines, [
           s => s.toUpperCase() === String(mlfb).toUpperCase(),
           s => /^(overview|vista general)$/i.test(s)
         ]);
 
-        // Construye párrafo técnico a partir del ancla
+        // Párrafo técnico
         let paragraph = pickParagraph(lines, Math.max(0, idxOverview));
-
-        // Si quedó flojo, busca en todo el doc
         if (!isGood(paragraph)) paragraph = pickParagraph(lines, 0);
 
-        // Post-procesado: cortar secciones y quedarnos con la frase útil
+        // Post-procesado y recortes finales
         let description = finalize(paragraph, mlfb);
 
         if (isGood(description) && score(description) > score(best.description)) {
@@ -75,7 +74,6 @@ export default async function handler(req, res) {
   } catch (e) {
     return res.status(500).json({ ok:false, msg: e?.message || 'Error interno', description:'' });
   }
-  
 }
 
 /* ===== helpers ===== */
@@ -85,24 +83,23 @@ function sanitizeRaw(txt){
   return txt
     .replace(/\u00A0/g,' ')
     .replace(/\r/g,'')
-     // imágenes: ![alt](url)
+    // imágenes: ![alt](url)
     .replace(/!\[[^\]]*\]\([^)]+\)/g, ' ')
     // enlaces: [text](url) -> text
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
     // headings/bullets
     .replace(/^[#>*\-\s]+/gm, '')
-    // “based on trending… stories carousel…”
-     .replace(/\b(Descargar|Descargue|Download|Herunterladen)\b[^.\n]*\b(product(o)?s?|product|Produkte)?\b[^.\n]*\b(imagen(es)?|images?|Daten|data)\b[^.\n]*[.\n]/gi, ' ')
-    // “See all … / Updates for … / Download product …”
+    // “Descargar/Download/Herunterladen … imágenes/datos…”
+    .replace(/\b(Descargar|Descargue|Download|Herunterladen)\b[^.\n]*\b(product(o)?s?|product|Produkte)?\b[^.\n]*\b(imagen(es)?|images?|Daten|data)\b[^.\n]*[.\n]/gi, ' ')
+    // “See all / Ver todo / Alle … anzeigen”
     .replace(/\b(See all|Ver (todo|todas?)|Alle .* anzeigen)\b[^.\n]*[.\n]/gi, ' ')
-    // bloque “Title/Source/Published Time”
-     .replace(/^Title:.*$|^Source:.*$|^Published Time:.*$/gmi, '')
+    // bloque Title/Source/Published
+    .replace(/^Title:.*$|^Source:.*$|^Published Time:.*$/gmi, '')
     // carruseles “Stories/Slides”
+    .replace(/Stories? Carousel.*$/gmi, ' ')
+    .replace(/^Slide \d+ of \d+.*$/gmi, ' ')
+    // compacta espacios
     .replace(/[ \t]+/g,' ');
-  .replace(/Stories? Carousel.*$/gmi, ' ')
-  .replace(/^Slide \d+ of \d+.*$/gmi, ' ')
-  // compacta espacios
-  .replace(/[ \t]+/g,' ');
 }
 
 function indexOfFirst(arr, testers) {
@@ -114,15 +111,6 @@ function indexOfFirst(arr, testers) {
 
 function pickParagraph(lines, fromIdx) {
   const stopper = /(Specifications|Especificaciones|Documents?\s*&\s*downloads|Support|Soporte|Related products?)/i;
-  // recorte exacto hasta "keeper kit" si aparece
-  const kk = description.toLowerCase().indexOf('keeper kit');
-  if (kk >= 0) description = description.slice(0, kk + 'keeper kit'.length);
-
-  // si aún queda muy largo, quédate con la primera oración técnica larga
-  if (description.length > 250) {
-    const m = description.match(/^(.{80,300}?)(?:\.|;|:)(\s|$)/);
-    if (m) description = m[1];
-  }    
   const isTitle = (s) =>
     /^[A-Z0-9._-]{6,}$/.test(s) ||
     /^(overview|vista general)$/i.test(s);
@@ -137,14 +125,14 @@ function pickParagraph(lines, fromIdx) {
       continue;
     }
 
-    // filtros línea-a-línea de ruido residual
+    // ruido residual
     if (/^(updates?|see all|catalog(\/| )brochure|application example|faq|certificates?|gsd:|download|product note)/i.test(s)) {
       continue;
     }
 
     cur.push(s);
     const joined = cur.join(' ');
-    if (isGood(joined) && /[.;:]$/.test(s)) return joined;  // ya hay una oración técnica
+    if (isGood(joined) && /[.;:]$/.test(s)) return joined;  // oración técnica completa
     if (joined.length > 700) return joined;                  // no comerse todo
   }
   const joined = cur.join(' ');
@@ -155,23 +143,23 @@ function finalize(text, mlfb){
   if (!text) return '';
   let desc = text;
 
-  // Corte duro cuando aparecen otras secciones en el mismo bloque
+  // Cortes de sección si quedaron en el mismo bloque
   desc = desc.split(/\b(Specifications|Especificaciones|Documents?\s*&\s*downloads|Support|Soporte|Related products?)\b/i)[0];
 
   // Para 3VA: cortar exactamente en “keeper kit” (incluido)
   const kk = desc.toLowerCase().indexOf('keeper kit');
   if (kk >= 0) desc = desc.slice(0, kk + 'keeper kit'.length);
 
-  // Si aún es largo, quedarnos con la primera oración técnica “grande”
+  // Si aún es largo, quédate con la primera oración técnica “grande”
   if (desc.length > 250) {
-    const m = desc.match(/^(.{80,300}?)(?:\.|;|:)(\s|$)/); // 1ª oración larga
+    const m = desc.match(/^(.{80,300}?)(?:\.|;|:)(\s|$)/);
     if (m) desc = m[1];
   }
 
   // Limpieza final
   desc = desc.replace(/\s+/g,' ').trim();
 
-  // Evitar que se quede con el código solo
+  // Evita quedarte con el código solo
   if (new RegExp(`^${escapeRegExp(String(mlfb))}\\b`, 'i').test(desc) && desc.length < 40) {
     return '';
   }
