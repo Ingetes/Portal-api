@@ -1,145 +1,83 @@
-import chromium from "@sparticuz/chromium";
-import puppeteer from "puppeteer-core";
-
-// Recomendado por @sparticuz para entornos serverless
-chromium.setHeadlessMode = true;
-chromium.setGraphicsMode = false;
-
-const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
-
+// api/industry-mall.js
 export default async function handler(req, res) {
   try {
     // CORS
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    if (req.method === "OPTIONS") return res.status(200).end();
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') return res.status(200).end();
 
     const { mlfb } = req.query;
-    if (!mlfb) return res.status(400).json({ ok: false, msg: "Falta mlfb", description: "" });
-
-    // Muy importante: usar el binario de @sparticuz/chromium
-    const executablePath = await chromium.executablePath();
-
-    const browser = await puppeteer.launch({
-      args: [
-        ...chromium.args,
-        // flags extra que evitan dependencias gráficas
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--single-process"
-      ],
-      defaultViewport: chromium.defaultViewport,
-      executablePath,          // <- aquí va el binario empaquetado
-      headless: chromium.headless,
-      ignoreHTTPSErrors: true
-    });
-
-    const page = await browser.newPage();
-    await page.setUserAgent(UA);
-
-    // Probaremos en 3 idiomas porque a veces el contenido varía
-    const langs = ["en", "es", "de"];
-    let description = "";
-    let source = "";
-
-    for (const lang of langs) {
-      const url = `https://mall.industry.siemens.com/mall/${lang}/ww/Catalog/Product/?mlfb=${encodeURIComponent(
-        mlfb
-      )}`;
-      try {
-        await page.goto(url, { waitUntil: "networkidle2", timeout: 35000 });
-
-        // aceptar cookies si aparece
-        await page.evaluate(() => {
-          const btn = Array.from(document.querySelectorAll("button, a")).find((el) =>
-            /accept all|accept|agree|aceptar|zustimmen/i.test(el.textContent || "")
-          );
-          if (btn) btn.click();
-        });
-        await page.waitForTimeout(800);
-
-        // leer meta / bloques visibles
-        const cand = await page.evaluate(() => {
-          const clean = (s) => (s || "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
-          const meta =
-            document.querySelector("meta[property='og:description']")?.content ||
-            document.querySelector("meta[name='description']")?.content ||
-            "";
-
-          // JSON Next.js si existe
-          let jsonDesc = "";
-          try {
-            const nd = document.getElementById("__NEXT_DATA__")?.textContent;
-            if (nd) {
-              const data = JSON.parse(nd);
-              const keys = [
-                "shortText",
-                "shorttext",
-                "short_description",
-                "shortDescription",
-                "longText",
-                "longDescription",
-                "marketingText",
-                "description"
-              ];
-              const stack = [data];
-              while (stack.length) {
-                const cur = stack.pop();
-                if (cur && typeof cur === "object") {
-                  for (const k of keys) {
-                    if (typeof cur[k] === "string" && cur[k].trim()) {
-                      jsonDesc = cur[k];
-                      break;
-                    }
-                  }
-                  if (jsonDesc) break;
-                  for (const v of Object.values(cur)) if (v && typeof v === "object") stack.push(v);
-                }
-              }
-            }
-          } catch {}
-
-          const blocks = [
-            ".product-description",
-            ".productDetails__text",
-            "#productDescription",
-            ".product-overview",
-            ".product__description",
-            "article",
-            "main"
-          ]
-            .flatMap((sel) => Array.from(document.querySelectorAll(sel)).map((n) => clean(n.textContent)))
-            .filter((t) => t && t.length > 30)
-            .sort((a, b) => b.length - a.length);
-
-          const h1 = clean(document.querySelector("h1")?.textContent);
-
-          let text = clean(jsonDesc) || clean(meta) || (blocks[0] || "");
-          if (!text || text.length < 25) text = [h1, text].filter(Boolean).join(". ");
-
-          return text;
-        });
-
-        if (cand && cand.length > 25) {
-          description = cand.length > 900 ? cand.slice(0, 900) + "…" : cand;
-          source = url;
-          break;
-        }
-      } catch (e) {
-        // intenta con el siguiente idioma
-      }
+    if (!mlfb || typeof mlfb !== 'string') {
+      return res.status(400).json({ ok:false, msg:'Falta parámetro mlfb', description:'' });
     }
 
-    await browser.close();
+    const langs = ['en', 'es', 'de'];
+    let best = { description: '', source: '' };
 
-    if (!description) description = `${mlfb} — ver ficha en Industry Mall.`;
-    res.status(200).json({ ok: true, source, description });
+    for (const lang of langs) {
+      const source = `https://mall.industry.siemens.com/mall/${lang}/ww/Catalog/Product/?mlfb=${encodeURIComponent(mlfb)}`;
+      const proxy = `https://r.jina.ai/http://mall.industry.siemens.com/mall/${lang}/ww/Catalog/Product/?mlfb=${encodeURIComponent(mlfb)}`;
+      try {
+        const r = await fetch(proxy, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (IngetesBot/1.0)',
+            'Accept': 'text/plain'
+          },
+          // evita 403 por caches intermedios
+          cache: 'no-store'
+        });
+        if (!r.ok) continue;
+
+        const txt = (await r.text() || '').replace(/\u00A0/g,' ').replace(/\r/g,'').trim();
+        if (!txt) continue;
+
+        // Parse: nos quedamos con una línea “descriptiva”
+        const lines = txt
+          .split('\n')
+          .map(s => s.trim())
+          .filter(Boolean)
+          // quitamos líneas muy cortas o típicas de navegación
+          .filter(s => s.length >= 20 && !/^(siemens|industry|mall|login|cart|menu)/i.test(s))
+          // fuera ruido de cookies, GDPR, etc.
+          .filter(s => !/(cookies|consent|privacy|policy|terms|search)/i.test(s));
+
+        // Intentar una que contenga términos técnicos (suele ser la descripción)
+        const pick = (arr) => {
+          const good = arr.find(s =>
+            /\b(AC|DC|V|A|kW|kA|mm|IP\d{2}|UL|CE|IEC|module|módulo|breaker|contactor|input|output|I\/O|ET\s?200|LOGO!|PLC)\b/i.test(s)
+          );
+          return good || arr[0] || '';
+        };
+
+        let description = pick(lines);
+        // Evitar quedarnos con el puro MLFB como “descripción”
+        if (new RegExp(`\\b${escapeRegExp(mlfb)}\\b`).test(description) && description.length < 40) {
+          // Busca la siguiente línea útil
+          const idx = lines.indexOf(description);
+          description = pick(lines.slice(idx + 1)) || description;
+        }
+
+        description = description.replace(/\s+/g,' ').trim();
+        if (description.length > 900) description = description.slice(0, 900) + '…';
+
+        // guardamos la mejor (por longitud y presencia de términos técnicos)
+        const score = (s) => !s ? 0 :
+          Math.min(s.length, 600)/10 + (/\b(AC|DC|V|A|kW|mm|IP|UL|IEC|module|módulo|breaker|contactor|I\/O)\b/i.test(s) ? 40 : 0);
+        if (score(description) > score(best.description)) {
+          best = { description, source };
+        }
+        if (score(best.description) >= 60) break; // suficiente
+      } catch { /* intenta siguiente idioma */ }
+    }
+
+    if (!best.description) {
+      best.description = `${mlfb} — ver ficha en Industry Mall.`;
+    }
+    return res.status(200).json({ ok:true, source: best.source, description: best.description });
   } catch (e) {
-    // Si vuelve a fallar, veremos el mensaje completo
-    res.status(500).json({ ok: false, msg: e?.message || "Error interno", description: "" });
+    return res.status(500).json({ ok:false, msg: e?.message || 'Error interno', description:'' });
   }
 }
+
+function escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
