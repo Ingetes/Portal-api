@@ -102,9 +102,10 @@ function indexOfFirst(arr, testers) {
 }
 
 function pickParagraph(lines, fromIdx) {
-const isTitle = (s) =>
-  /^[A-Z0-9._-]{6,}$/.test(s) ||
-  /^(overview|vista general|resumen general)$/i.test(s);
+  const stopper = /(Specifications|Especificaciones|Documents?\s*&\s*downloads|Documentos?\s*&\s*descargas|Support|Soporte|Related products?|Productos relacionados)/i;
+  const isTitle = (s) =>
+    /^[A-Z0-9._-]{6,}$/.test(s) ||
+    /^(overview|vista general|resumen general)$/i.test(s);
 
   let cur = [];
   for (let i = fromIdx; i < lines.length; i++) {
