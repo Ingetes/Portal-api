@@ -4,18 +4,15 @@ import * as cheerio from 'cheerio';
 
 export default async function handler(req, res) {
   try {
+    // CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-    if (req.method === 'OPTIONS') {
-      res.status(200).end(); return;
-    }
+    if (req.method === 'OPTIONS') return res.status(200).end();
 
     const { mlfb } = req.query;
     if (!mlfb || typeof mlfb !== 'string') {
-      res.status(400).json({ ok:false, msg: 'Falta parámetro mlfb' });
-      return;
+      return res.status(400).json({ ok:false, msg:'Falta parámetro mlfb', description:'' });
     }
 
     const target = `https://mall.industry.siemens.com/mall/en/ww/Catalog/Product/?mlfb=${encodeURIComponent(mlfb)}`;
@@ -23,34 +20,37 @@ export default async function handler(req, res) {
     const r = await fetch(target, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; IngetesBot/1.0)',
-        'Accept-Language': 'en-US,en;q=0.8,es-CO;q=0.7'
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,es-CO;q=0.8',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
       },
-      redirect: 'follow',
-      timeout: 20000
+      redirect: 'follow'
     });
 
     if (!r.ok) {
-      res.status(r.status).json({ ok:false, msg:`HTTP ${r.status}`, description:'' });
-      return;
+      return res.status(r.status).json({ ok:false, msg:`HTTP ${r.status}`, description:'', source: target });
     }
 
     const html = await r.text();
     const $ = cheerio.load(html);
 
-    // 1) Intento por meta tags
-    let description =
-      $('meta[property="og:description"]').attr('content') ||
-      $('meta[name="description"]').attr('content') ||
-      '';
+    // 0) Título del producto (para fallback)
+    const ogTitle = $('meta[property="og:title"]').attr('content')?.trim() || '';
+    const h1Title  = $('h1').first().text().replace(/\s+/g,' ').trim();
 
-    // 2) Intento por JSON embebido (siemens a veces mete datos estructurados)
+    // 1) Meta description
+    let description =
+      $('meta[property="og:description"]').attr('content')?.trim() ||
+      $('meta[name="description"]').attr('content')?.trim() || '';
+
+    // 2) JSON-LD (si existiera)
     if (!description) {
-      const scripts = Array.from($('script[type="application/ld+json"]')).map(s => $(s).html());
-      for (const sc of scripts) {
+      $('script[type="application/ld+json"]').each((_, el) => {
+        if (description) return;
         try {
-          const data = JSON.parse(sc);
-          // puede ser objeto o array; buscamos description en cualquiera
-          const pick = (obj) => (obj && (obj.description || obj.headline || obj.name)) || '';
+          const data = JSON.parse($(el).html() || '{}');
+          const pick = (x) => (x?.description || x?.headline || x?.name || '').trim();
           if (Array.isArray(data)) {
             for (const item of data) {
               description = pick(item);
@@ -59,39 +59,41 @@ export default async function handler(req, res) {
           } else {
             description = pick(data);
           }
-          if (description) break;
         } catch {}
-      }
+      });
     }
 
-    // 3) Intento por selectores visibles comunes (ajústalos si ves otra estructura)
+    // 3) Bloques visibles (probamos varias clases/ids frecuentes)
     if (!description) {
-      // títulos / bloques de características
-      const txts = [
+      const candidates = [
         $('.product-description').text(),
         $('.productDetails__text').text(),
         $('.productDetails').text(),
         $('#productDescription').text(),
-        $('main').text()
-      ].filter(Boolean);
-      // escoger la línea más "útil" (más larga y limpia)
-      description = txts
-        .map(t => (t || '').replace(/\s+/g,' ').trim())
-        .sort((a,b)=> b.length - a.length)[0] || '';
-      // corta si es demasiado larga
-      if (description.length > 1000) {
-        description = description.slice(0, 1000) + '…';
+        $('.product-overview').text(),
+        $('.product__description').text(),
+        $('main').text(), // último recurso: texto largo
+      ].filter(Boolean).map(t => t.replace(/\s+/g,' ').trim()).filter(t => t.length > 30);
+
+      if (candidates.length) {
+        // nos quedamos con el texto “más descriptivo”
+        description = candidates.sort((a,b) => b.length - a.length)[0];
+        // recortamos si es demasiado largo
+        if (description.length > 900) description = description.slice(0, 900) + '…';
       }
     }
 
-    // Limpieza final
-    description = (description || '')
-      .replace(/\s+/g, ' ')
-      .replace(/\u00A0/g,' ')
-      .trim();
+    // 4) Fallback final: usar título si no hay descripción
+    if (!description) {
+      const title = ogTitle || h1Title || mlfb;
+      description = `${title} — ver ficha en Industry Mall.`;
+    }
 
-    res.status(200).json({ ok:true, source: target, description });
+    // Limpieza
+    description = description.replace(/\u00A0/g,' ').replace(/\s+/g,' ').trim();
+
+    return res.status(200).json({ ok:true, source: target, description });
   } catch (e) {
-    res.status(500).json({ ok:false, msg: (e && e.message) || 'Error interno', description:'' });
+    return res.status(500).json({ ok:false, msg: e?.message || 'Error interno', description:'' });
   }
 }
