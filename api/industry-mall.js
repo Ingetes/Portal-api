@@ -46,9 +46,10 @@ if (!txt) continue;
         );
 
         // Ancla: MLFB o “Overview/Vista general”
-        const idxOverview = indexOfFirst(lines, [
-        s => /^(overview|vista general|resumen general)$/i.test(s)
-        ]);
+const idxOverview = indexOfFirst(lines, [
+  s => s.toUpperCase() === String(mlfb).toUpperCase(),
+  s => /^(overview|vista general|resumen general)$/i.test(s)
+]);
 
         // Párrafo técnico
         let paragraph = pickParagraph(lines, Math.max(0, idxOverview));
@@ -77,6 +78,10 @@ if (!txt) continue;
 // Limpia markdown y bloques de ruido grandes
 function sanitizeRaw(txt){
   return txt
+    // líneas de descarga tipo “Descargar… / Download… / Herunterladen…”
+    .replace(/\b(Descargar|Descargue|Download|Herunterladen)[^\n.]*[.\n]/gi, ' ')
+    // “See all / Ver todo / Alle … anzeigen”
+    .replace(/\b(See all|Ver (todo|todas?)|Alle .* anzeigen)[^\n.]*[.\n]/gi, ' ')
     .replace(/\u00A0/g,' ')
     .replace(/\r/g,'')
     // imágenes: ![alt](url)
@@ -124,8 +129,8 @@ function pickParagraph(lines, fromIdx) {
 
     cur.push(s);
     const joined = cur.join(' ');
-    if (isGood(joined) && /[.;:]$/.test(s)) return joined;  // oración técnica completa
-    if (joined.length > 700) return joined;                  // no comerse todo
+    if (isGood(joined) && /[.;:]$/.test(s)) return joined;
+    if (joined.length > 700) return joined;
   }
   const joined = cur.join(' ');
   return isGood(joined) ? joined : '';
@@ -137,7 +142,26 @@ function finalize(text, mlfb){
 
   // Cortes de sección si quedaron en el mismo bloque
   desc = desc.split(/\b(Specifications|Especificaciones|Documents?\s*&\s*downloads|Support|Soporte|Related products?)\b/i)[0];
+// cortes adicionales de cosas no descriptivas (ES/EN)
+const hardStops = [
+  'mostrar más', 'mostrar menos', 'show more', 'show less',
+  'estado del ciclo de vida', 'product lifecycle',
+  'producto activo', 'active product',
+  'clase de producto', 'product class',
+  'dimensiones del embalaje', 'packaging dimensions',
+  'peso neto', 'net weight',
+  'imprimir', 'print',
+  'iniciar sesión', 'sign in',
+  'añadir al carrito', 'add to cart'
+];
 
+let cutAt = desc.length;
+for (const key of hardStops) {
+  const p = desc.toLowerCase().indexOf(key);
+  if (p >= 0) cutAt = Math.min(cutAt, p);
+}
+desc = desc.slice(0, cutAt).trim();
+  
   // Para 3VA: cortar exactamente en “keeper kit” (incluido)
   const kk = desc.toLowerCase().indexOf('keeper kit');
   if (kk >= 0) desc = desc.slice(0, kk + 'keeper kit'.length);
