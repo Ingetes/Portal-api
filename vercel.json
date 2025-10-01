@@ -1,0 +1,9 @@
+{
+  "functions": {
+    "api/industry-mall.js": {
+      "runtime": "nodejs20.x",
+      "memory": 1024,
+      "maxDuration": 20
+    }
+  }
+}
