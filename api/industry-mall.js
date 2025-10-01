@@ -12,186 +12,167 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok:false, msg:'Falta parámetro mlfb', description:'' });
     }
 
-    // 1) Intentar directamente SiePortal (donde está el Overview real)
-    const sieCandidates = [
-      `https://sieportal.siemens.com/en-ww/product/${encodeURIComponent(mlfb)}`,
-      `https://sieportal.siemens.com/en-ww/search?q=${encodeURIComponent(mlfb)}`,
-      `https://sieportal.siemens.com/es-co/product/${encodeURIComponent(mlfb)}`,
-      `https://sieportal.siemens.com/es-co/search?q=${encodeURIComponent(mlfb)}`
-    ];
+    const langs = ['en', 'es', 'de'];
+    let best = { description: '', source: '' };
 
-    let best = { description:'', source:'' };
+    for (const lang of langs) {
+      const source = `https://mall.industry.siemens.com/mall/${lang}/ww/Catalog/Product/?mlfb=${encodeURIComponent(mlfb)}`;
+      const proxy  = `https://r.jina.ai/http://mall.industry.siemens.com/mall/${lang}/ww/Catalog/Product/?mlfb=${encodeURIComponent(mlfb)}`;
 
-    for (const url of sieCandidates) {
-      const text = await fetchText(url);
-      if (!text) continue;
+      try {
+        const r = await fetch(proxy, { headers: { 'Accept': 'text/plain' }, cache: 'no-store' });
+        if (!r.ok) continue;
 
-      // Si fue página de búsqueda, intenta localizar el primer /product/ en el html plano
-      const found = sniffSiePortalProductUrl(text) || url;
-      const body = found !== url ? await fetchText(found) : text;
+        let txt = await r.text();
+        if (!txt) continue;
 
-      const desc = extractOverview(body, mlfb);
-      if (score(desc) > score(best.description)) best = { description: desc, source: found };
-      if (score(best.description) >= 80) break;
-    }
+        // --- Limpieza fuerte de markdown y ruido global ---
+        txt = sanitizeRaw(txt);
 
-    // 2) Si aún no logramos una buena, intenta con el Mall (limpieza agresiva)
-    if (score(best.description) < 60) {
-      const langs = ['en','es','de'];
-      for (const lang of langs) {
-        const mallUrl = `https://mall.industry.siemens.com/mall/${lang}/ww/Catalog/Product/?mlfb=${encodeURIComponent(mlfb)}`;
-        const mallTxt = await fetchText(mallUrl);
-        if (!mallTxt) continue;
+        const linesAll = txt.split('\n').map(s => s.trim());
 
-        // si el Mall enlaza SiePortal, usarlo
-        const sieUrl = sniffSiePortalUrl(mallTxt);
-        if (sieUrl) {
-          const sieTxt = await fetchText(sieUrl);
-          const desc = extractOverview(sieTxt, mlfb);
-          if (score(desc) > score(best.description)) best = { description: desc, source: sieUrl };
-          if (score(best.description) >= 80) break;
+        // Filtra ruido típico línea a línea
+        const lines = linesAll.filter(s =>
+          s &&
+          s.length > 1 &&
+          !/^(siemens|industry|mall|home)$/i.test(s) &&
+          !/(cookies|consent|privacy|login|cart|search|terms)/i.test(s) &&
+          !/^image\s*\d*:/i.test(s) &&
+          !/^slide\s*\d+\s*of\s*\d+$/i.test(s) &&
+          !/^stories? carousel/i.test(s) &&
+          !/^(updates?|see all|catalog(\/| )brochure|application example|faq|certificates?|gsd:|download|product note)/i.test(s)
+        );
+
+        // Encuentra ancla: MLFB o tab Overview
+        const idxOverview = indexOfFirst(lines, [
+          s => s.toUpperCase() === String(mlfb).toUpperCase(),
+          s => /^(overview|vista general)$/i.test(s)
+        ]);
+
+        // Construye párrafo técnico a partir del ancla
+        let paragraph = pickParagraph(lines, Math.max(0, idxOverview));
+
+        // Si quedó flojo, busca en todo el doc
+        if (!isGood(paragraph)) paragraph = pickParagraph(lines, 0);
+
+        // Post-procesado: cortar secciones y quedarnos con la frase útil
+        let description = finalize(paragraph, mlfb);
+
+        if (isGood(description) && score(description) > score(best.description)) {
+          best = { description, source };
         }
-
-        // si no, cortar el propio Mall alrededor del Overview
-        const descMall = extractOverviewFromMall(mallTxt, mlfb);
-        if (score(descMall) > score(best.description)) best = { description: descMall, source: mallUrl };
-        if (score(best.description) >= 80) break;
-      }
+        if (score(best.description) >= 70) break;
+      } catch { /* siguiente idioma */ }
     }
 
-    // 3) Fallback
-    if (!best.description) best = { description: `${mlfb} — ver ficha en Industry Mall.`, source: '' };
-
-    // 4) Recorte especial pedido: hasta "keeper kit" (incluido) para 3VA
-    if (/^3VA/i.test(mlfb)) {
-      const i = best.description.toLowerCase().indexOf('keeper kit');
-      if (i >= 0) best.description = best.description.slice(0, i + 'keeper kit'.length).trim();
-    }
-
-    // 5) Limitar longitud final
-    if (best.description.length > 900) best.description = best.description.slice(0,900) + '…';
-
+    if (!best.description) best.description = `${mlfb} — ver ficha en Industry Mall.`;
     return res.status(200).json({ ok:true, source: best.source, description: best.description });
+
   } catch (e) {
-    return res.status(200).json({ ok:false, msg: e?.message || 'Error', description:'' });
+    return res.status(500).json({ ok:false, msg: e?.message || 'Error interno', description:'' });
   }
 }
 
-/* ================= helpers ================= */
+/* ===== helpers ===== */
 
-// Usa el proxy de texto (sin headless). Devuelve markdown plano del HTML.
-async function fetchText(url){
-  try{
-    const proxy = `https://r.jina.ai/http://${url.replace(/^https?:\/\//,'')}`;
-    const r = await fetch(proxy, { headers:{ Accept:'text/plain' }, cache:'no-store' });
-    if (!r.ok) return '';
-    return (await r.text() || '').replace(/\u00A0/g,' ').replace(/\r/g,'');
-  }catch{ return ''; }
+// Limpia markdown y bloques de ruido grandes
+function sanitizeRaw(txt){
+  return txt
+    .replace(/\u00A0/g,' ')
+    .replace(/\r/g,'')
+    // imágenes: ![alt](url)
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, ' ')
+    // enlaces: [text](url) -> text
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    // headings/bullets
+    .replace(/^[#>*\-\s]+/gm, '')
+    // “based on trending… stories carousel…”
+    .replace(/Based on trending topics[\s\S]*?(Stories Carousel|Slide \d+ of \d+)/i, ' ')
+    // “See all … / Updates for … / Download product …”
+    .replace(/\b(Updates? for|See all (product notes|characteristics|FAQs|catalogs|brochures|certificates|downloads|application examples|product (data|images)))\b[\s\S]*?($|\n)/gi,' ')
+    // bloque “Title/Source/Published Time”
+    .replace(/^Title:.*$|^Source:.*$|^Published Time:.*$/gmi, '')
+    // compactar espacios
+    .replace(/[ \t]+/g,' ');
 }
 
-function sniffSiePortalUrl(txt){
-  const m = txt.match(/https?:\/\/sieportal\.siemens\.com\/[^\s)]+/i);
-  return m ? m[0] : '';
-}
-function sniffSiePortalProductUrl(txt){
-  const m = txt.match(/https?:\/\/sieportal\.siemens\.com\/[a-z-]+\/product\/[^\s)]+/i);
-  return m ? m[0] : '';
-}
-
-function baseClean(s){
-  return s
-    .replace(/!\[[^\]]*]\([^)]+\)/g,' ')   // imágenes ![...](...)
-    .replace(/\[([^\]]+)\]\([^)]+\)/g,'$1')// enlaces [txt](url) -> txt
-    .replace(/^[#>*\-\s]+/gm,'')           // headings markdown y bullets
-    .replace(/[ \t]+/g,' ')
-    .trim();
-}
-
-// Extrae el párrafo de Overview desde SiePortal
-function extractOverview(raw, mlfb){
-  if (!raw) return '';
-  let t = baseClean(raw);
-
-  // ancla: MLFB o "Overview"
-  let i = t.toUpperCase().indexOf(String(mlfb).toUpperCase());
-  if (i < 0) {
-    const w = t.search(/\b(Overview|Vista general)\b/i);
-    i = w >= 0 ? w : 0;
+function indexOfFirst(arr, testers) {
+  for (let i = 0; i < arr.length; i++) {
+    for (const t of testers) if (t(arr[i])) return i;
   }
-  // ventana local
-  let win = t.slice(Math.max(0, i - 600), i + 5000);
-
-  // “tijeras” por secciones típicas
-  win = win.split(/\b(Specifications|Especificaciones|Documents?\s*&\s*downloads|Support|Soporte|Related products?)\b/i)[0];
-
-  // limpieza de ruido
-  win = stripMallNoise(win);
-
-  // párrafo técnico
-  const lines = win.split('\n').map(s=>s.trim()).filter(Boolean);
-  let desc = pickParagraph(lines);
-
-  desc = desc.replace(/\s+/g,' ').trim();
-  return isGood(desc) ? desc : '';
+  return -1;
 }
 
-// Extrae desde el propio Mall si no hay SiePortal
-function extractOverviewFromMall(raw, mlfb){
-  if (!raw) return '';
-  let t = baseClean(raw);
-
-  // ancla en MLFB/Overview
-  let i = t.toUpperCase().indexOf(String(mlfb).toUpperCase());
-  if (i < 0) {
-    const w = t.search(/\b(Overview|Vista general)\b/i);
-    i = w >= 0 ? w : 0;
-  }
-  let win = t.slice(Math.max(0, i - 600), i + 6000);
-  win = win.split(/\b(Specifications|Especificaciones|Documents?\s*&\s*downloads|Support|Soporte|Related products?)\b/i)[0];
-  win = stripMallNoise(win);
-
-  const lines = win.split('\n').map(s=>s.trim()).filter(Boolean);
-  let desc = pickParagraph(lines);
-
-  desc = desc.replace(/\s+/g,' ').trim();
-  return isGood(desc) ? desc : '';
-}
-
-// Remueve bloques que te estaban saliendo (“Updates…”, “See all…”, etc.)
-function stripMallNoise(s){
-  return s
-    .replace(/Based on trending topics[\s\S]*?(Stories Carousel|Slide \d+ of \d+)/i,' ')
-    .replace(/\b(Updates? for|See all (product notes|characteristics|FAQs|catalogs|brochures|certificates|downloads|application examples|product (data|images)))\b[\s\S]*?(\d{2}\/\d{2}\/\d{4}|$)/gi,' ')
-    .replace(/\b(FAQ|GSD:|EU Declaration of Conformity|Chiller Plant|Buy now|Add to cart|Print|Download|Application example|Catalog(\/| )brochure)\b[\s\S]*?$/gi,' ');
-}
-
-function pickParagraph(lines){
-  const stop = /(Specifications|Especificaciones|Documents?\s*&\s*downloads|Support|Soporte|Related products?)/i;
-  const looksTitle = s => /^[A-Z0-9._-]{6,}$/.test(s) || /^(Overview|Vista general)$/i.test(s);
+function pickParagraph(lines, fromIdx) {
+  const stopper = /(Specifications|Especificaciones|Documents?\s*&\s*downloads|Support|Soporte|Related products?)/i;
+  const isTitle = (s) =>
+    /^[A-Z0-9._-]{6,}$/.test(s) ||
+    /^(overview|vista general)$/i.test(s);
 
   let cur = [];
-  for (let i=0;i<lines.length;i++){
+  for (let i = fromIdx; i < lines.length; i++) {
     const s = lines[i];
-    if (!s || looksTitle(s) || stop.test(s)) {
+
+    if (!s || isTitle(s) || stopper.test(s)) {
       if (isGood(cur.join(' '))) break;
       cur = [];
       continue;
     }
-    // filtros línea a línea (ruido)
-    if (/^(Updates?|See all|Catalog(\/| )brochure|Application example|FAQ|Certificates?|GSD:|Download|Product note)/i.test(s)) continue;
+
+    // filtros línea-a-línea de ruido residual
+    if (/^(updates?|see all|catalog(\/| )brochure|application example|faq|certificates?|gsd:|download|product note)/i.test(s)) {
+      continue;
+    }
 
     cur.push(s);
     const joined = cur.join(' ');
-    if (isGood(joined) && /[.;:]$/.test(s)) return joined;
-    if (joined.length > 700) return joined; // no comerse todo
+    if (isGood(joined) && /[.;:]$/.test(s)) return joined;  // ya hay una oración técnica
+    if (joined.length > 700) return joined;                  // no comerse todo
   }
   const joined = cur.join(' ');
   return isGood(joined) ? joined : '';
 }
 
-function isGood(s){
-  if (!s || s.length < 60) return false;
-  const tech = /\b(AC|DC|V|A|kA|kW|mm|IP\d{2}|UL|IEC|breaker|contactor|module|módulo|input|output|I\/O|short-?circuit|overload|frame|3[- ]?pole|3P|ET\s?200|LOGO!|PLC|bus\s*bar|protection|diagnostics|In=|Icu=|Ir=|Ii=|24V|24 V|type\s*\d|\bPNP\b|\bIEC\s*61131\b)\b/i;
-  return tech.test(s) || s.length > 140;
+function finalize(text, mlfb){
+  if (!text) return '';
+  let desc = text;
+
+  // Corte duro cuando aparecen otras secciones en el mismo bloque
+  desc = desc.split(/\b(Specifications|Especificaciones|Documents?\s*&\s*downloads|Support|Soporte|Related products?)\b/i)[0];
+
+  // Para 3VA: cortar exactamente en “keeper kit” (incluido)
+  const kk = desc.toLowerCase().indexOf('keeper kit');
+  if (kk >= 0) desc = desc.slice(0, kk + 'keeper kit'.length);
+
+  // Si aún es largo, quedarnos con la primera oración técnica “grande”
+  if (desc.length > 250) {
+    const m = desc.match(/^(.{80,300}?)(?:\.|;|:)(\s|$)/); // 1ª oración larga
+    if (m) desc = m[1];
+  }
+
+  // Limpieza final
+  desc = desc.replace(/\s+/g,' ').trim();
+
+  // Evitar que se quede con el código solo
+  if (new RegExp(`^${escapeRegExp(String(mlfb))}\\b`, 'i').test(desc) && desc.length < 40) {
+    return '';
+  }
+  return desc;
 }
-function score(s){ if (!s) return 0; const base = Math.min(s.length,600)/10; const bonus = /\b(AC|DC|V|A|kA|kW|mm|IP\d{2}|UL|IEC|breaker|module|I\/O)\b/i.test(s)?40:0; return base+bonus; }
+
+function isGood(s){
+  if (!s) return false;
+  const t = s.trim();
+  if (t.length < 60) return false;
+  const tech = /\b(AC|DC|V|A|kA|kW|mm|IP\d{2}|UL|IEC|breaker|contactor|module|módulo|input|output|I\/O|short-?circuit|overload|frame|3[- ]?pole|3P|ET\s?200|LOGO!|PLC|bus\s*bar|protection|diagnostics|In=|Icu=|Ir=|Ii=|24V|24 V|type\s*\d|\bPNP\b|\bIEC\s*61131\b)\b/i;
+  return tech.test(t) || t.length > 140;
+}
+
+function score(s){
+  if (!s) return 0;
+  const base = Math.min(s.length, 600)/10;
+  const bonus = /\b(AC|DC|V|A|kW|kA|mm|IP\d{2}|UL|IEC|breaker|module|I\/O)\b/i.test(s) ? 40 : 0;
+  return base + bonus;
+}
+
+function escapeRegExp(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
