@@ -1,90 +1,78 @@
-// /api/ingenieros.js
+// /api/ingenieros.js  (Vercel)
+// Usa tus variables: GH_TOKEN, GH_OWNER, GH_REPO, ADMIN_KEY, ING_JSON_PATH (opcional)
 export default async function handler(req, res) {
-  // === CONFIG ===
-  const GITHUB_TOKEN = process.env.GITHUB_TOKEN;         // PAT con permiso "repo"
-  const OWNER        = process.env.GITHUB_OWNER;         // ej: "ingetes"
-  const REPO         = process.env.GITHUB_REPO;          // ej: "portal-cotizaciones"
-  const FILE_PATH    = process.env.ING_JSON_PATH || "Ingenieros.json"; // ruta en el repo (raíz o carpeta)
+  const GH_TOKEN = process.env.GH_TOKEN;        // PAT con scope "repo"
+  const GH_OWNER = process.env.GH_OWNER;        // "Ingetes" (según tu captura)
+  const GH_REPO  = process.env.GH_REPO;         // "Portal-de-cotizaciones"
+  const ADMIN_KEY= process.env.ADMIN_KEY || ""; // "admin" en tu captura
+  const FILE_PATH= process.env.ING_JSON_PATH || "Ingenieros.json";
 
-  if (!GITHUB_TOKEN || !OWNER || !REPO || !FILE_PATH) {
-    return res.status(500).json({ error: "Faltan variables de entorno." });
-  }
-
-  // GitHub Contents API endpoints
-  const FILE_URL = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${encodeURIComponent(FILE_PATH)}`;
-
-  // Util: fetch a GitHub with auth
-  const gh = (url, init={}) => fetch(url, {
-    ...init,
-    headers: {
-      "Authorization": `Bearer ${GITHUB_TOKEN}`,
-      "Accept": "application/vnd.github+json",
-      "User-Agent": "ingetes-portal",
-      ...(init.headers || {})
-    }
-  });
-
-  // CORS básico
+  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,PUT,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Admin-Key");
   if (req.method === "OPTIONS") return res.status(204).end();
+
+  // Protección opcional por admin key en PUT
+  if (req.method === "PUT" && ADMIN_KEY) {
+    const key = req.headers["x-admin-key"];
+    if (key !== ADMIN_KEY) return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  if (!GH_TOKEN || !GH_OWNER || !GH_REPO) {
+    return res.status(500).json({ error: "Faltan GH_TOKEN/GH_OWNER/GH_REPO" });
+  }
+
+  const FILE_URL = `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${encodeURIComponent(FILE_PATH)}`;
+  const gh = (url, init = {}) =>
+    fetch(url, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${GH_TOKEN}`,
+        Accept: "application/vnd.github+json",
+        "User-Agent": "ingetes-portal",
+        ...(init.headers || {}),
+      },
+    });
 
   try {
     if (req.method === "GET") {
-      // Lee archivo desde GitHub
       const r = await gh(FILE_URL);
-      if (r.status === 404) {
-        // si no existe, devolver lista base
-        return res.status(200).json({ ingenieros: [] });
-      }
-      if (!r.ok) {
-        const t = await r.text();
-        return res.status(r.status).json({ error: t });
-      }
-      const json = await r.json();
-      const content = Buffer.from(json.content || "", "base64").toString("utf8");
-      let data;
-      try { data = JSON.parse(content); } catch { data = { ingenieros: [] }; }
-      return res.status(200).json({ ingenieros: data.ingenieros || [] });
+      if (r.status === 404) return res.status(200).json({ ingenieros: [] });
+      if (!r.ok) return res.status(r.status).json({ error: await r.text() });
+      const data = await r.json();
+      const content = Buffer.from(data.content || "", "base64").toString("utf8");
+      let json;
+      try { json = JSON.parse(content); } catch { json = { ingenieros: [] }; }
+      return res.status(200).json({ ingenieros: json.ingenieros || [] });
     }
 
     if (req.method === "PUT") {
-      // Recibe { ingenieros: [...] }
-      const body = req.body && (typeof req.body === "string" ? JSON.parse(req.body) : req.body);
-      const arr = Array.isArray(body?.ingenieros) ? body.ingenieros : null;
-      if (!arr) return res.status(400).json({ error: "Payload inválido: {ingenieros: string[]}" });
+      const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+      const lista = Array.isArray(body?.ingenieros) ? body.ingenieros : null;
+      if (!lista) return res.status(400).json({ error: "Payload inválido: {ingenieros: string[]}" });
 
-      // 1) Obtener sha actual (si existe)
-      let sha = undefined;
+      // Obtener sha actual (si existe)
+      let sha;
       const cur = await gh(FILE_URL);
-      if (cur.ok) {
-        const cjson = await cur.json();
-        sha = cjson.sha;
-      } else if (cur.status !== 404) {
-        const t = await cur.text();
-        return res.status(cur.status).json({ error: t });
-      }
+      if (cur.ok) sha = (await cur.json()).sha;
+      else if (cur.status !== 404) return res.status(cur.status).json({ error: await cur.text() });
 
-      // 2) Preparar contenido nuevo
-      const contentStr = JSON.stringify({ ingenieros: arr }, null, 2);
-      const b64 = Buffer.from(contentStr, "utf8").toString("base64");
+      // Preparar contenido
+      const text = JSON.stringify({ ingenieros: lista }, null, 2);
+      const b64  = Buffer.from(text, "utf8").toString("base64");
 
-      // 3) PUT (create/update) a GitHub
       const put = await gh(FILE_URL, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: "chore: actualizar lista de ingenieros desde el portal",
           content: b64,
-          sha
-        })
+          sha,
+        }),
       });
 
-      if (!put.ok) {
-        const t = await put.text();
-        return res.status(put.status).json({ error: t });
-      }
+      if (!put.ok) return res.status(put.status).json({ error: await put.text() });
       return res.status(200).json({ ok: true });
     }
 
