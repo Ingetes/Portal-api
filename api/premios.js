@@ -1,9 +1,8 @@
-// Runtime Edge (rápido) + Vercel Blob para persistir JSON
-export const config = { runtime: 'edge' };
+export const config = { runtime: 'nodejs20.x' };
 
 import { put, list } from '@vercel/blob';
 
-const PATH = 'ingepuntos/Premios.json'; // clave fija
+const PATH = 'ingepuntos/Premios.json';
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET,PUT,OPTIONS',
@@ -41,39 +40,19 @@ export default async function handler(req) {
     let body = null;
     try { body = await req.json(); } catch { return bad('Body JSON inválido'); }
 
-    const premios = Array.isArray(body)
-      ? body
-      : Array.isArray(body?.premios)
-      ? body.premios
+    const premios = Array.isArray(body) ? body
+      : Array.isArray(body?.premios) ? body.premios
       : null;
-
     if (!premios) return bad('Se espera { premios: [...] }');
 
-    const cleaned = premios
-      .map(x => ({
-        umbral:
-          Number(
-            String(
-              x.umbral ??
-                x.Ingepuntos ??
-                x.ingepuntos ??
-                x.puntos ??
-                x['Puntos requeridos'] ??
-                x['Costo'] ??
-                x['Costo (puntos)']
-            ).replace(/[^0-9-]/g, '')
-          ) || 0,
-        desc: String(
-          x.desc ??
-            x.descripcion ??
-            x['Descripción'] ??
-            x['Descripción del premio'] ??
-            x.premio ??
-            x.Premio ??
-            ''
-        ).trim(),
-      }))
-      .filter(p => p.umbral > 0 && p.desc);
+    const cleaned = premios.map(x => ({
+      umbral: Number(String(
+        x.umbral ?? x.Ingepuntos ?? x.ingepuntos ?? x.puntos ?? x['Puntos requeridos'] ?? x['Costo'] ?? x['Costo (puntos)']
+      ).replace(/[^0-9-]/g,'')) || 0,
+      desc: String(
+        x.desc ?? x.descripcion ?? x['Descripción'] ?? x['Descripción del premio'] ?? x.premio ?? x.Premio ?? ''
+      ).trim()
+    })).filter(p => p.umbral > 0 && p.desc);
 
     const json = JSON.stringify({ premios: cleaned }, null, 2);
     await put(PATH, json, {
