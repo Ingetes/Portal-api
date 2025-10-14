@@ -4,5 +4,6 @@
   "dependencies": {
     "@sparticuz/chromium": "^127.0.0",
     "puppeteer-core": "^22.8.0"
+    "@vercel/blob": "latest"
   }
 }
