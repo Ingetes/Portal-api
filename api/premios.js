@@ -20,7 +20,10 @@ export default async function handler(req, res) {
   const repoKey = (req.query?.repo || req.headers["x-repo"] || "").toString().toLowerCase();
   const CFG = repoKey === "ingepuntos" ? CFG2 : CFG1; // default: repo1 (portal)
 
-  const GH_TOKEN  = process.env.GH_TOKEN;
+const GH_TOKEN = (repoKey === 'ingepuntos')
+  ? (process.env.GH_TOKEN2 || process.env.GH_TOKEN)
+  : process.env.GH_TOKEN;
+
   const ADMIN_KEY = process.env.ADMIN_KEY_AWARDS || process.env.ADMIN_KEY || "";
 
   // CORS
