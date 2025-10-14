@@ -1,12 +1,12 @@
 export const config = { runtime: "nodejs" };
 
 export default async function handler(req, res) {
-  const GH_TOKEN  = process.env.GH_TOKEN;
-  const GH_OWNER  = process.env.GH_OWNER;
-  const GH_REPO   = process.env.GH_REPO;
-  const GH_BRANCH = process.env.GH_BRANCH || "main";                // <-- NUEVO
-  const ADMIN_KEY = process.env.ADMIN_KEY_AWARDS || process.env.ADMIN_KEY || ""; // <-- acepta ambas
-  const FILE_PATH = process.env.AWARDS_JSON_PATH || "Premios.json";
+const GH_OWNER  = 'Ingetes';
+const GH_REPO   = 'INGEPUNTOS';
+const GH_BRANCH = 'main';
+const FILE_PATH = 'Premios.json';
+const ADMIN_KEY = process.env.ADMIN_KEY_AWARDS || 'admin';
+const GH_TOKEN  = process.env.GH_TOKEN;
 
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,PUT,OPTIONS");
